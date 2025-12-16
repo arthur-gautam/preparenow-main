@@ -1,0 +1,67 @@
+{
+  "expo": {
+    "name": "PrepareNow",
+    "slug": "preparenow-emergency",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "light",
+    "splash": {
+      "image": "./assets/splash-icon.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#FF3B30"
+    },
+    "updates": {
+      "fallbackToCacheTimeout": 0
+    },
+    "assetBundlePatterns": [
+      "**/*"
+    ],
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.yourcompany.preparenow",
+      "infoPlist": {
+        "NSLocationAlwaysAndWhenInUseUsageDescription": "This app needs your location to alert you when you enter or exit emergency disaster zones, even when the app is closed or in the background.",
+        "NSLocationWhenInUseUsageDescription": "This app needs your location to show nearby disaster zones and alert you about emergencies.",
+        "NSLocationAlwaysUsageDescription": "This app needs background location access to alert you about emergency zones even when the app is closed.",
+        "UIBackgroundModes": [
+          "location"
+        ]
+      }
+    },
+    "android": {
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/adaptive-icon.png",
+        "backgroundColor": "#FF3B30"
+      },
+      "package": "com.yourcompany.preparenow",
+      "permissions": [
+        "ACCESS_COARSE_LOCATION",
+        "ACCESS_FINE_LOCATION",
+        "ACCESS_BACKGROUND_LOCATION",
+        "POST_NOTIFICATIONS"
+      ]
+    },
+    "web": {
+      "favicon": "./assets/favicon.png"
+    },
+    "plugins": [
+      [
+        "expo-location",
+        {
+          "locationAlwaysAndWhenInUsePermission": "Allow PrepareNow to use your location to alert you about emergency disaster zones, even when the app is closed.",
+          "locationAlwaysPermission": "Allow PrepareNow to use your location in the background to alert you about emergency zones.",
+          "locationWhenInUsePermission": "Allow PrepareNow to use your location to show nearby disaster zones.",
+          "isAndroidBackgroundLocationEnabled": true,
+          "isAndroidForegroundServiceEnabled": true
+        }
+      ],
+      [
+        "expo-notifications",
+        {
+          "color": "#FF3B30"
+        }
+      ]
+    ]
+  }
+}
