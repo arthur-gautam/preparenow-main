@@ -31,10 +31,10 @@ export const TEST_GEOFENCES: DisasterGeofence[] = [
     type: 'FLOOD',
     severity: 'HIGH',
 
-    latitude: 52.936548,  // Derby city center
-    longitude: -1.445967,
+    latitude: 52.9225,  // Derby city center
+    longitude: -1.4746,
 
-    radius: 1000, // INCREASED for easier testing
+    radius: 1000, // INCREASED for easier  c
     notifyOnEnter: true,
     notifyOnExit: true,
     description: 'Derby City Centre - High Flood Risk Zone',
