@@ -5,7 +5,9 @@ import * as TaskManager from 'expo-task-manager';
 import { Platform } from 'react-native';
 
 const GEOFENCE_TASK = 'GEOFENCE_BACKGROUND_TASK';
+const LOCATION_WATCH_TASK = 'LOCATION_WATCH_TASK';
 const LOGS_STORAGE_KEY = 'geofence_logs';
+const ZONE_STATE_KEY = 'geofence_zone_state';
 const ANDROID_CHANNEL_ID = 'geofence-alerts';
 
 // Disaster Types
@@ -408,10 +410,17 @@ TaskManager.defineTask(GEOFENCE_TASK, async ({ data, error }) => {
 
   const alertContent = getDisasterAlertContent(geofence.type, geofence.severity, isEntering);
 
-  // Send notification
+  // Update zone state tracking
+  if (isEntering) {
+    await addToInsideZones(identifier);
+  } else {
+    await removeFromInsideZones(identifier);
+  }
+
+  // Send notification with enhanced title for visibility
   await sendAlertNotification({
-    title: alertContent.title,
-    body: alertContent.body,
+    title: isEntering ? `⚠️ ${alertContent.title}` : `✅ ${alertContent.title}`,
+    body: isEntering ? alertContent.body : `You have left ${geofence.description}. ${alertContent.body}`,
     sound: alertContent.sound,
     priority: isEntering ? alertContent.priority : Notifications.AndroidNotificationPriority.DEFAULT,
     data: {
@@ -422,6 +431,7 @@ TaskManager.defineTask(GEOFENCE_TASK, async ({ data, error }) => {
       event: isEntering ? 'ENTER' : 'EXIT',
       geofenceId: geofence.identifier,
       timestamp,
+      source: 'background_geofence',
     },
   });
 
@@ -550,8 +560,23 @@ export async function startGeofencing(): Promise<void> {
     console.log('='.repeat(60));
     console.log('GEOFENCING SETUP COMPLETE');
     console.log(`Monitoring ${TEST_GEOFENCES.length} disaster zones`);
-    console.log('Walk around to trigger geofence events!');
     console.log('='.repeat(60));
+    console.log('');
+
+    // 10. CRITICAL: Check initial position and notify if already inside zones
+    console.log('10. Checking initial position for immediate alerts...');
+    await checkInitialPosition();
+
+    // 11. Start foreground location watching for more reliable transitions
+    console.log('11. Starting foreground location watching...');
+    await startLocationWatching();
+
+    console.log('');
+    console.log('🎉 GEOFENCING FULLY INITIALIZED');
+    console.log('   - Background geofencing active');
+    console.log('   - Foreground location watching active');
+    console.log('   - Initial position checked');
+    console.log('   Walk around to trigger geofence events!');
     console.log('');
 
   } catch (error) {
@@ -563,6 +588,9 @@ export async function startGeofencing(): Promise<void> {
 export async function stopGeofencing(): Promise<void> {
   console.log('Stopping geofencing...');
 
+  // Stop foreground location watching
+  stopLocationWatching();
+
   const registered = await TaskManager.isTaskRegisteredAsync(GEOFENCE_TASK);
   if (!registered) {
     console.log('⚠️ Task not registered, nothing to stop');
@@ -571,6 +599,10 @@ export async function stopGeofencing(): Promise<void> {
 
   await Location.stopGeofencingAsync(GEOFENCE_TASK);
   console.log('Geofencing stopped');
+
+  // Clear zone state when stopping
+  await clearZoneState();
+  console.log('Zone state cleared');
 }
 
 export async function isGeofencingActive(): Promise<boolean> {
@@ -663,4 +695,351 @@ export function getSeverityColor(severity: SeverityLevel): string {
     CRITICAL: '#D32F2F',
   };
   return colors[severity];
+}
+
+// ============================================================================
+// ZONE STATE TRACKING - Track which zones the user is currently inside
+// ============================================================================
+
+interface ZoneState {
+  insideZones: string[];  // Array of zone identifiers the user is currently inside
+  lastUpdated: string;
+}
+
+async function getZoneState(): Promise<ZoneState> {
+  try {
+    const state = await AsyncStorage.getItem(ZONE_STATE_KEY);
+    if (state) {
+      return JSON.parse(state) as ZoneState;
+    }
+  } catch (error) {
+    console.error('Error getting zone state:', error);
+  }
+  return { insideZones: [], lastUpdated: new Date().toISOString() };
+}
+
+async function setZoneState(state: ZoneState): Promise<void> {
+  try {
+    await AsyncStorage.setItem(ZONE_STATE_KEY, JSON.stringify(state));
+  } catch (error) {
+    console.error('Error saving zone state:', error);
+  }
+}
+
+async function addToInsideZones(zoneId: string): Promise<void> {
+  const state = await getZoneState();
+  if (!state.insideZones.includes(zoneId)) {
+    state.insideZones.push(zoneId);
+    state.lastUpdated = new Date().toISOString();
+    await setZoneState(state);
+    console.log(`📍 Added ${zoneId} to inside zones. Current: ${state.insideZones.join(', ')}`);
+  }
+}
+
+async function removeFromInsideZones(zoneId: string): Promise<void> {
+  const state = await getZoneState();
+  const index = state.insideZones.indexOf(zoneId);
+  if (index > -1) {
+    state.insideZones.splice(index, 1);
+    state.lastUpdated = new Date().toISOString();
+    await setZoneState(state);
+    console.log(`📍 Removed ${zoneId} from inside zones. Current: ${state.insideZones.join(', ') || 'none'}`);
+  }
+}
+
+async function isInsideZone(zoneId: string): Promise<boolean> {
+  const state = await getZoneState();
+  return state.insideZones.includes(zoneId);
+}
+
+async function clearZoneState(): Promise<void> {
+  await AsyncStorage.removeItem(ZONE_STATE_KEY);
+  console.log('📍 Zone state cleared');
+}
+
+// ============================================================================
+// INITIAL POSITION CHECK - Check if user is already inside zones when starting
+// ============================================================================
+
+/**
+ * Check the user's current position against all geofences and send notifications
+ * for any zones they are already inside. This is critical because geofence events
+ * only trigger on TRANSITION (entering/exiting), not on initial position.
+ */
+export async function checkInitialPosition(): Promise<void> {
+  console.log('');
+  console.log('🔍 CHECKING INITIAL POSITION...');
+  console.log('='.repeat(60));
+
+  try {
+    const location = await Location.getCurrentPositionAsync({
+      accuracy: Location.Accuracy.High,
+    });
+
+    console.log(`📍 Current Position: ${location.coords.latitude.toFixed(6)}, ${location.coords.longitude.toFixed(6)}`);
+    console.log(`📍 Accuracy: ±${location.coords.accuracy?.toFixed(1)}m`);
+
+    const currentState = await getZoneState();
+    const currentlyInside: string[] = [];
+
+    for (const geofence of TEST_GEOFENCES) {
+      const distance = calculateDistance(
+        location.coords.latitude,
+        location.coords.longitude,
+        geofence.latitude,
+        geofence.longitude
+      );
+
+      const isInside = distance <= geofence.radius;
+      console.log(`   ${geofence.description}: ${distance.toFixed(0)}m ${isInside ? '✅ INSIDE' : '⚪ Outside'}`);
+
+      if (isInside) {
+        currentlyInside.push(geofence.identifier);
+
+        // If user wasn't previously known to be inside this zone, send ENTER notification
+        if (!currentState.insideZones.includes(geofence.identifier)) {
+          console.log(`   🚨 NEW ZONE ENTRY DETECTED: ${geofence.description}`);
+
+          const alertContent = getDisasterAlertContent(geofence.type, geofence.severity, true);
+
+          await sendAlertNotification({
+            title: `⚠️ ${alertContent.title}`,
+            body: alertContent.body,
+            sound: alertContent.sound,
+            priority: alertContent.priority,
+            data: {
+              type: geofence.type,
+              severity: geofence.severity,
+              action: alertContent.actionText,
+              zoneName: geofence.description,
+              event: 'ENTER',
+              geofenceId: geofence.identifier,
+              timestamp: new Date().toISOString(),
+              source: 'initial_check',
+            },
+          });
+
+          await logEvent({
+            type: 'ENTER',
+            timestamp: new Date().toISOString(),
+            location: {
+              latitude: location.coords.latitude,
+              longitude: location.coords.longitude,
+            },
+            disasterType: geofence.type,
+            severity: geofence.severity,
+            zoneName: geofence.description,
+          });
+        }
+      } else {
+        // If user was previously inside this zone but is now outside, send EXIT notification
+        if (currentState.insideZones.includes(geofence.identifier)) {
+          console.log(`   🟢 ZONE EXIT DETECTED: ${geofence.description}`);
+
+          const alertContent = getDisasterAlertContent(geofence.type, geofence.severity, false);
+
+          await sendAlertNotification({
+            title: `✅ ${alertContent.title}`,
+            body: `You have left ${geofence.description}. ${alertContent.body}`,
+            sound: alertContent.sound,
+            priority: alertContent.priority,
+            data: {
+              type: geofence.type,
+              severity: geofence.severity,
+              action: alertContent.actionText,
+              zoneName: geofence.description,
+              event: 'EXIT',
+              geofenceId: geofence.identifier,
+              timestamp: new Date().toISOString(),
+              source: 'initial_check',
+            },
+          });
+
+          await logEvent({
+            type: 'EXIT',
+            timestamp: new Date().toISOString(),
+            location: {
+              latitude: location.coords.latitude,
+              longitude: location.coords.longitude,
+            },
+            disasterType: geofence.type,
+            severity: geofence.severity,
+            zoneName: geofence.description,
+          });
+        }
+      }
+    }
+
+    // Update the zone state with current inside zones
+    await setZoneState({
+      insideZones: currentlyInside,
+      lastUpdated: new Date().toISOString(),
+    });
+
+    console.log('');
+    if (currentlyInside.length > 0) {
+      console.log(`⚠️ YOU ARE CURRENTLY INSIDE ${currentlyInside.length} EMERGENCY ZONE(S)`);
+    } else {
+      console.log('✅ You are not currently inside any emergency zones');
+    }
+    console.log('='.repeat(60));
+    console.log('');
+
+  } catch (error) {
+    console.error('❌ Error checking initial position:', error);
+  }
+}
+
+// ============================================================================
+// FOREGROUND LOCATION WATCHING - Continuous monitoring for better accuracy
+// ============================================================================
+
+let locationSubscription: Location.LocationSubscription | null = null;
+
+/**
+ * Start watching the user's location in the foreground for more accurate
+ * zone enter/exit detection. This supplements the background geofence triggers.
+ */
+export async function startLocationWatching(): Promise<void> {
+  console.log('📍 Starting foreground location watching...');
+
+  // Stop any existing subscription
+  if (locationSubscription) {
+    locationSubscription.remove();
+    locationSubscription = null;
+  }
+
+  locationSubscription = await Location.watchPositionAsync(
+    {
+      accuracy: Location.Accuracy.High,
+      timeInterval: 10000,    // Check every 10 seconds
+      distanceInterval: 50,   // Or when user moves 50 meters
+    },
+    async (location) => {
+      await handleLocationUpdate(location);
+    }
+  );
+
+  console.log('📍 Foreground location watching started');
+}
+
+/**
+ * Handle a location update and check for zone transitions
+ */
+async function handleLocationUpdate(location: Location.LocationObject): Promise<void> {
+  const currentState = await getZoneState();
+  const newInsideZones: string[] = [];
+
+  for (const geofence of TEST_GEOFENCES) {
+    const distance = calculateDistance(
+      location.coords.latitude,
+      location.coords.longitude,
+      geofence.latitude,
+      geofence.longitude
+    );
+
+    const isInside = distance <= geofence.radius;
+
+    if (isInside) {
+      newInsideZones.push(geofence.identifier);
+
+      // User entered a new zone
+      if (!currentState.insideZones.includes(geofence.identifier)) {
+        console.log(`🚨 ENTERED ZONE (foreground): ${geofence.description}`);
+
+        const alertContent = getDisasterAlertContent(geofence.type, geofence.severity, true);
+
+        await sendAlertNotification({
+          title: `⚠️ ${alertContent.title}`,
+          body: alertContent.body,
+          sound: alertContent.sound,
+          priority: alertContent.priority,
+          data: {
+            type: geofence.type,
+            severity: geofence.severity,
+            action: alertContent.actionText,
+            zoneName: geofence.description,
+            event: 'ENTER',
+            geofenceId: geofence.identifier,
+            timestamp: new Date().toISOString(),
+            source: 'foreground_watch',
+          },
+        });
+
+        await logEvent({
+          type: 'ENTER',
+          timestamp: new Date().toISOString(),
+          location: {
+            latitude: location.coords.latitude,
+            longitude: location.coords.longitude,
+          },
+          disasterType: geofence.type,
+          severity: geofence.severity,
+          zoneName: geofence.description,
+        });
+      }
+    } else {
+      // User exited a zone
+      if (currentState.insideZones.includes(geofence.identifier)) {
+        console.log(`🟢 EXITED ZONE (foreground): ${geofence.description}`);
+
+        const alertContent = getDisasterAlertContent(geofence.type, geofence.severity, false);
+
+        await sendAlertNotification({
+          title: `✅ ${alertContent.title}`,
+          body: `You have left ${geofence.description}. ${alertContent.body}`,
+          sound: alertContent.sound,
+          priority: alertContent.priority,
+          data: {
+            type: geofence.type,
+            severity: geofence.severity,
+            action: alertContent.actionText,
+            zoneName: geofence.description,
+            event: 'EXIT',
+            geofenceId: geofence.identifier,
+            timestamp: new Date().toISOString(),
+            source: 'foreground_watch',
+          },
+        });
+
+        await logEvent({
+          type: 'EXIT',
+          timestamp: new Date().toISOString(),
+          location: {
+            latitude: location.coords.latitude,
+            longitude: location.coords.longitude,
+          },
+          disasterType: geofence.type,
+          severity: geofence.severity,
+          zoneName: geofence.description,
+        });
+      }
+    }
+  }
+
+  // Update zone state
+  if (JSON.stringify(newInsideZones.sort()) !== JSON.stringify(currentState.insideZones.sort())) {
+    await setZoneState({
+      insideZones: newInsideZones,
+      lastUpdated: new Date().toISOString(),
+    });
+  }
+}
+
+/**
+ * Stop watching the user's location in the foreground
+ */
+export function stopLocationWatching(): void {
+  if (locationSubscription) {
+    locationSubscription.remove();
+    locationSubscription = null;
+    console.log('📍 Foreground location watching stopped');
+  }
+}
+
+/**
+ * Get the current zone state (for debugging)
+ */
+export async function getCurrentZoneState(): Promise<ZoneState> {
+  return await getZoneState();
 }
